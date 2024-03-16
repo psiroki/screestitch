@@ -30,8 +30,19 @@ function dumpImageData(imgData) {
   return c;
 }
 
-function createImageData(typedArray, width, height) {
-  const arr = new Uint8ClampedArray(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength);
+function createImageData(typedArray, width, height, pitch = 0) {
+  let arr;
+  if (pitch && pitch !== width) {
+    arr = new Uint8ClampedArray(width * height * 4);
+    const unpacked = new Uint8ClampedArray(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength);
+    let offset = 0;
+    for (let y = 0; y < height; ++y) {
+      arr.set(unpacked.subarray(offset, offset + width*4), y * width * 4)
+      offset += pitch*4;
+    }
+  } else {
+    arr = new Uint8ClampedArray(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength);
+  }
   return new ImageData(arr, width, height);
 }
 
@@ -40,6 +51,9 @@ async function loadWasmAndRun() {
   const imagePromises = ["1.png", "2.png"].map(loadImage);
   const response = await fetch("screestitch.wasm");
   let memory;
+  let overlap = [];
+  let phase = -1;
+  let quadInt;
   const instanceAndModule = await WebAssembly.instantiateStreaming(response, { env: {
     setMemorySize(bytes) {
       if (bytes) {
@@ -55,6 +69,18 @@ async function loadWasmAndRun() {
     },
     dumpInt(val) {
       console.log(val);
+    },
+    dumpQuadInt(a, b, c, d) {
+      quadInt = [a, b, c, d];
+    },
+    phase(p) {
+      phase = p;
+    },
+    dumpScore(score, x, y, w, h, a, b) {
+      overlap = { score, x, y, w, h, a, b };
+    },
+    reportProgress(progress) {
+      console.log(progress);
     }
   }});
   const images = (await Promise.all(imagePromises)).map(getImageData);
@@ -63,15 +89,19 @@ async function loadWasmAndRun() {
   const bytesRequired = images.reduce((val, imageData) => val + imageData.width * imageData.height, 0) * 6;
   const mip = instance.exports.mip;
   const createImageBuffer = instance.exports.createImageBuffer;
+  const getPitch = instance.exports.getPitch;
   const getWidth = instance.exports.getWidth;
   const getHeight = instance.exports.getHeight;
   const getPixels = instance.exports.getPixels;
   const numPixels = instance.exports.numPixels;
-  const overlapScore = instance.exports.overlapScore;
+  const findOverlap = instance.exports.findOverlap;
+  const createMipChain = instance.exports.createMipChain;
+  const getMipChainSize = instance.exports.getMipChainSize;
+  const getMipMap = instance.exports.getMipMap;
 
   function imageDataOf(imageBuffer) {
     const pixels = new Uint32Array(memory.buffer, getPixels(imageBuffer), numPixels(imageBuffer));
-    return createImageData(pixels, getWidth(imageBuffer), getHeight(imageBuffer));
+    return createImageData(pixels, getWidth(imageBuffer), getHeight(imageBuffer), getPitch(imageBuffer));
   }
 
   function imageDataToBuffer(imageData) {
@@ -98,9 +128,21 @@ async function loadWasmAndRun() {
     }
   }
 
-  console.log(overlapScore(imageDataToBuffer(images[0]), imageDataToBuffer(images[1]), -7, -15));
-//  generateMipmaps(images[0]);
+  let start = performance.now();
+  try {
+    console.log(Number(findOverlap(imageDataToBuffer(images[0]), imageDataToBuffer(images[1]))).toExponential());
+  } finally {
+    console.log(quadInt);
+    console.log(phase, overlap, [overlap.a, overlap.b].map(e => [getWidth(e), getHeight(e), getPixels(e), getPixels(e) + getHeight(e) * getPitch(e)]));
+  }
+  console.log(performance.now() - start);
+  overlap && console.log(images[0], Number(overlap.score).toExponential(), overlap.x, overlap.y, overlap.w+"x"+overlap.h);
+  dumpImageData(imageDataOf(overlap.a)).setAttribute("style", "opacity: 0.5; position: absolute; left: 10px; top: 10px;");
+  dumpImageData(imageDataOf(overlap.b)).setAttribute("style", `opacity: 0.5; position: absolute; left: ${overlap.x+10}px; top: ${overlap.y+10}px;`);
+  document.body.setAttribute("style", "transform-origin: 0 0; transform: scale(0.5);");
+  //  generateMipmaps(images[0]);
 //  generateMipmaps(images[1]);
 }
 
+console.log("1..");
 loadWasmAndRun();

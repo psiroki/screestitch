@@ -74,11 +74,59 @@ namespace {
     }
     return buffer;
   }
+
+  inline uint32_t channelSimilarityScore(uint32_t a, uint32_t b, uint32_t shift) {
+    uint32_t as = a >> shift & 0xff;
+    uint32_t bs = b >> shift & 0xff;
+    return 0xff - (as > bs ? as - bs : bs - as);
+  }
+
+  uint32_t pixelSimilarityScore(uint32_t a, uint32_t b) {
+    uint32_t score = channelSimilarityScore(a, b, 0);
+    score += channelSimilarityScore(a, b, 8);
+    score += channelSimilarityScore(a, b, 16);
+    // we are ignoring the alpha channel
+    return score;
+  }
+
+  int numBitsUsed(uint32_t bits) {
+    int result = 0;
+    while (bits) {
+      bits >>= 1;
+      ++result;
+    }
+    return result;
+  }
+
+  struct MipChain {
+    uint32_t size, capacity;
+    ImageBuffer **buffers;
+
+    void add(ImageBuffer *ptr) {
+      buffers[size++] = ptr;
+    }
+
+    ImageBuffer* get(int index) {
+      return buffers[index];
+    }
+  };
 }
 
 extern "C" unsigned char __heap_base;
 extern "C" uint32_t setMemorySize(uint32_t newSize);
 extern "C" void dumpInt(int32_t val);
+extern "C" void dumpQuadInt(int64_t a, int64_t b, int64_t c, int64_t d);
+extern "C" void dumpScore(uint64_t score, int32_t x, int32_t y, uint32_t w, uint32_t h, const void *a, const void *b);
+extern "C" void phase(int32_t p);
+extern "C" void reportProgress(uint32_t remaining);
+
+static void dumpPointer(const void *p) {
+  dumpInt(reinterpret_cast<uint32_t>(p));
+}
+
+static void dumpPointerDelta(const void *a, const void *b) {
+  dumpInt(reinterpret_cast<uint32_t>(b)-reinterpret_cast<uint32_t>(a));
+}
 
 __attribute__ ((visibility("default"))) 
 void *getHeapBase() {
@@ -86,6 +134,9 @@ void *getHeapBase() {
 }
 
 namespace {
+  static const uint32_t allocBy = 256*1024*1024;
+  static const uint32_t *zeroAddress = nullptr;
+
   struct LinearAllocator;
 
   class AllocatorGuard {
@@ -107,6 +158,9 @@ namespace {
       lastKnownMemoryEnd = reinterpret_cast<uint32_t*>(setMemorySize(newSize));
     }
   public:
+    const uint32_t* top() const {
+      return allocTop;
+    }
 
     uint32_t *allocateBytes(uint32_t numBytes) {
       return allocateWords((numBytes + 3) >> 2);
@@ -120,8 +174,8 @@ namespace {
       if (allocTop > lastKnownMemoryEnd) {
         uint32_t memorySize = reinterpret_cast<uint32_t>(lastKnownMemoryEnd);
         uint32_t additional = numWords << 2;
-        // we always grow by at least 4 MB
-        if (additional < 4*1048576) additional = 4*1048576;
+        // we always grow by at least allocBy
+        if (additional < allocBy) additional = allocBy;
         setMemorySize(memorySize + additional);
         refreshLastKnownMemoryEnd();
       }
@@ -145,6 +199,19 @@ namespace {
     if (ptr) allocator.release(ptr);
     ptr = nullptr;
   }
+
+  MipChain* allocateMipChain(uint32_t capacity) {
+    const uint32_t *start = allocator.top();
+    uint32_t numWords = (sizeof(MipChain) + capacity * sizeof(ImageBuffer*)) >> 2;
+    uint32_t *raw = allocator.allocateWords(numWords);
+    const uint32_t *end = allocator.top();
+    for (int i = 0; i < numWords; ++i)
+      raw[i] = 0;
+    MipChain *mc = reinterpret_cast<MipChain*>(raw);
+    mc->buffers = reinterpret_cast<ImageBuffer**>(raw + (sizeof(MipChain) >> 2));
+    mc->capacity = capacity;
+    return mc;
+  }
 }
 
 extern "C" ImageBuffer* createImageBuffer(uint32_t w, uint32_t h) {
@@ -162,6 +229,18 @@ extern "C" ImageBuffer* imageBufferShallowCopy(const ImageBuffer *buf) {
   result->pitch = buf->pitch;
   result->pixels = buf->pixels;
   return result;
+}
+
+extern "C" uint32_t getMipChainSize(const MipChain *mc) {
+  return mc->size;
+}
+
+extern "C" const ImageBuffer* getMipMap(const MipChain *mc, uint32_t index) {
+  return mc->buffers[index];
+}
+
+extern "C" uint32_t getPitch(const ImageBuffer *img) {
+  return img->pitch;
 }
 
 extern "C" uint32_t getWidth(const ImageBuffer *img) {
@@ -182,6 +261,7 @@ extern "C" uint32_t numPixels(const ImageBuffer *img) {
 
 extern "C" ImageBuffer* mip(const ImageBuffer *input) {
   const uint32_t *p = input->pixels;
+  const uint32_t p2 = input->pitch * 2;
   const uint32_t w = input->width;
   const uint32_t h = input->height;
   ImageBuffer *result = createImageBuffer((w+1) >> 1, (h+1) >> 1);
@@ -197,12 +277,16 @@ extern "C" ImageBuffer* mip(const ImageBuffer *input) {
       *output++ = pack(sum >> 2);
       p += right ? 2 : 1;
     }
-    p += w;
+    p += p2 - w;
   }
   return result;
 }
 
-extern "C" uint32_t overlapScore(const ImageBuffer *target, const ImageBuffer *source, int32_t ox, int32_t oy) {
+static void dumpRect(const Rect &r) {
+  dumpQuadInt(r.x1, r.y1, r.x2, r.y2);
+}
+
+extern "C" uint64_t overlapScore(const ImageBuffer *target, const ImageBuffer *source, int32_t ox, int32_t oy) {
   auto guard = allocator.guard();
 
   Rect unclippedInTarget = Rect(source->width, source->height);
@@ -212,5 +296,89 @@ extern "C" uint32_t overlapScore(const ImageBuffer *target, const ImageBuffer *s
   Rect clippedInSource = clipInSource(unclippedInTarget, clippedInTarget);
   ImageBuffer *clippedSource = clipImageBuffer(imageBufferShallowCopy(source), clippedInSource);
   ImageBuffer *clippedTarget = clipImageBuffer(imageBufferShallowCopy(target), clippedInTarget);
-  return (clippedSource->width ^ clippedTarget->width) | (clippedSource->height ^ clippedTarget->height);
+  const uint32_t w = clippedSource->width;
+  const uint32_t h = clippedSource->height;
+  const uint32_t sp = clippedSource->pitch;
+  const uint32_t tp = clippedTarget->pitch;
+  const uint32_t *sourceLine = clippedSource->pixels;
+  const uint32_t *targetLine = clippedTarget->pixels;
+  uint64_t score = 0;
+  for (uint32_t y = 0; y < h; ++y) {
+    uint32_t lastSource = *sourceLine;
+    uint32_t lastTarget = *targetLine;
+    for (uint32_t x = 0; x < w; ++x) {
+      uint32_t thisSource = sourceLine[x];
+      uint32_t thisTarget = targetLine[x];
+      if (pixelSimilarityScore(lastSource, thisSource) < (255-32)*3 &&
+          pixelSimilarityScore(lastTarget, thisTarget) < (255-32)*3) {
+        score += pixelSimilarityScore(thisSource, thisTarget);
+      }
+      lastSource = thisSource;
+      lastTarget = thisTarget;
+    }
+    sourceLine += sp;
+    targetLine += tp;
+  }
+  return score;
+}
+
+static int mipsRecommended(const ImageBuffer *a, int minimumSizeMagnitude) {
+  int wb = numBitsUsed(a->width);
+  int hb = numBitsUsed(a->height);
+  int b = wb > hb ? hb : wb;
+  return b > minimumSizeMagnitude ? b - minimumSizeMagnitude : 1;
+}
+
+static int mipsRecommendedCombined(const ImageBuffer *a, const ImageBuffer *b, int minimumSizeMagnitude) {
+  int am = mipsRecommended(a, minimumSizeMagnitude);
+  int bm = mipsRecommended(b, minimumSizeMagnitude);
+  return am > bm ? bm : am;
+}
+
+extern "C" MipChain* createMipChain(const ImageBuffer *a, int numMips) {
+  MipChain *chain = allocateMipChain(numMips);
+  chain->add(const_cast<ImageBuffer*>(a));
+  const ImageBuffer *buf = chain->get(1);
+  while (chain->size < chain->capacity) {
+    ImageBuffer *mipped = mip(chain->buffers[chain->size - 1]);
+    chain->add(mipped);
+  }
+  return chain;
+}
+
+extern "C" uint64_t findOverlap(const ImageBuffer *a, const ImageBuffer *b) {
+  auto guard = allocator.guard();
+  uint32_t remaining = (((numPixels(a) + numPixels(b)) >> 8) * 3) >> 1;
+  reportProgress(remaining + 1);
+  int numMips = mipsRecommendedCombined(a, b, 3);
+  MipChain *ac = createMipChain(a, numMips);
+  MipChain *bc = createMipChain(b, numMips);
+  uint64_t maxScore = 0;
+  int maxScoreX;
+  int maxScoreY;
+  reportProgress(remaining);
+  for (int i = numMips - 1; i >= 0; --i) {
+    ImageBuffer *am = ac->get(i);
+    ImageBuffer *bm = bc->get(i);
+    int x1 = maxScore ? maxScoreX*2-1 : -bm->width + 1;
+    int y1 = maxScore ? maxScoreY*2-1 : -bm->height + 1;
+    int x2 = maxScore ? maxScoreX*2+2 : am->width;
+    int y2 = maxScore ? maxScoreY*2+2 : am->height;
+    maxScore = 0;
+    for (int y = y1; y < y2; ++y) {
+      for (int x = x1; x < x2; ++x) {
+        uint64_t score = overlapScore(am, bm, x, y);
+        if (score > maxScore) {
+          maxScore = score;
+          maxScoreX = x;
+          maxScoreY = y;
+          dumpScore(maxScore, x, y, am->width, am->height, am, bm);
+        }
+      }
+    }
+    uint32_t processed = (numPixels(am) + numPixels(bm)) >> 8;
+    remaining = remaining > processed ? remaining - processed : 0;
+    reportProgress(remaining);
+  }
+  return maxScore;
 }
