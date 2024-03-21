@@ -34,6 +34,13 @@ namespace {
       if (y2 > other.y2) y2 = other.y2;
     }
 
+    void extend(const Rect &other) {
+      if (x1 > other.x1) x1 = other.x1;
+      if (y1 > other.y1) y1 = other.y1;
+      if (x2 < other.x2) x2 = other.x2;
+      if (y2 < other.y2) y2 = other.y2;
+    }
+
     bool isEmpty() const {
       return x1 >= x2 && y1 >= y2;
     }
@@ -117,7 +124,6 @@ extern "C" uint32_t setMemorySize(uint32_t newSize);
 extern "C" void dumpInt(int32_t val);
 extern "C" void dumpQuadInt(int64_t a, int64_t b, int64_t c, int64_t d);
 extern "C" void dumpScore(uint64_t score, int32_t x, int32_t y, uint32_t w, uint32_t h, const void *a, const void *b);
-extern "C" void phase(int32_t p);
 extern "C" void reportProgress(uint32_t remaining);
 
 static void dumpPointer(const void *p) {
@@ -128,8 +134,7 @@ static void dumpPointerDelta(const void *a, const void *b) {
   dumpInt(reinterpret_cast<uint32_t>(b)-reinterpret_cast<uint32_t>(a));
 }
 
-__attribute__ ((visibility("default"))) 
-void *getHeapBase() {
+static inline void *getHeapBase() {
   return &__heap_base;
 }
 
@@ -148,6 +153,7 @@ namespace {
       other.ptr = nullptr;
     }
     ~AllocatorGuard();
+    void release();
   };
 
   struct LinearAllocator {
@@ -160,6 +166,10 @@ namespace {
   public:
     const uint32_t* top() const {
       return allocTop;
+    }
+
+    void reset() {
+      allocTop = static_cast<uint32_t*>(getHeapBase());
     }
 
     uint32_t *allocateBytes(uint32_t numBytes) {
@@ -196,6 +206,10 @@ namespace {
   } allocator = { nullptr, nullptr };
 
   AllocatorGuard::~AllocatorGuard() {
+    release();
+  }
+
+  void AllocatorGuard::release() {
     if (ptr) allocator.release(ptr);
     ptr = nullptr;
   }
@@ -212,6 +226,10 @@ namespace {
     mc->capacity = capacity;
     return mc;
   }
+}
+
+extern "C" void reset() {
+  allocator.reset();
 }
 
 extern "C" ImageBuffer* createImageBuffer(uint32_t w, uint32_t h) {
@@ -346,7 +364,7 @@ extern "C" MipChain* createMipChain(const ImageBuffer *a, int numMips) {
   return chain;
 }
 
-extern "C" uint64_t findOverlap(const ImageBuffer *a, const ImageBuffer *b) {
+extern "C" ImageBuffer* findOverlap(const ImageBuffer *a, const ImageBuffer *b) {
   auto guard = allocator.guard();
   uint32_t remaining = (((numPixels(a) + numPixels(b)) >> 8) * 3) >> 1;
   reportProgress(remaining + 1);
@@ -354,8 +372,8 @@ extern "C" uint64_t findOverlap(const ImageBuffer *a, const ImageBuffer *b) {
   MipChain *ac = createMipChain(a, numMips);
   MipChain *bc = createMipChain(b, numMips);
   uint64_t maxScore = 0;
-  int maxScoreX;
-  int maxScoreY;
+  int maxScoreX = 0;
+  int maxScoreY = 0;
   reportProgress(remaining);
   for (int i = numMips - 1; i >= 0; --i) {
     ImageBuffer *am = ac->get(i);
@@ -380,5 +398,45 @@ extern "C" uint64_t findOverlap(const ImageBuffer *a, const ImageBuffer *b) {
     remaining = remaining > processed ? remaining - processed : 0;
     reportProgress(remaining);
   }
-  return maxScore;
+  Rect ar(a->width, a->height);
+  Rect br(b->width, b->height);
+  Rect abr(ar);
+  br.shift(maxScoreX, maxScoreY);
+  abr.extend(br);
+  int restoreX = maxScoreX < 0 ? -maxScoreX : 0;
+  int restoreY = maxScoreY < 0 ? -maxScoreY : 0;
+  ar.shift(restoreX, restoreY);
+  br.shift(restoreX, restoreY);
+
+  guard.release();
+
+  ImageBuffer *result = createImageBuffer(abr.getWidth(), abr.getHeight());
+  uint32_t numBytes = result->width * result->pitch;
+  for (uint32_t i = 0; i < numBytes; ++i)
+    result->pixels[i] = 0;
+  
+  auto resultGuard = allocator.guard();
+  
+  ImageBuffer *arc = clipImageBuffer(imageBufferShallowCopy(result), ar);
+  const uint32_t *srcLine = a->pixels;
+  uint32_t *dstLine = arc->pixels;
+  for (int y = 0; y < a->height; ++y) {
+    for (int x = 0; x < a->width; ++x) {
+      dstLine[x] = srcLine[x];
+    }
+    srcLine += a->pitch;
+    dstLine += arc->pitch;
+  }
+  ImageBuffer *brc = clipImageBuffer(imageBufferShallowCopy(result), br);
+  srcLine = b->pixels;
+  dstLine = brc->pixels;
+  for (int y = 0; y < b->height; ++y) {
+    for (int x = 0; x < b->width; ++x) {
+      dstLine[x] = srcLine[x];
+    }
+    srcLine += b->pitch;
+    dstLine += brc->pitch;
+  }
+
+  return result;
 }
