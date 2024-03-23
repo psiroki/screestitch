@@ -1,3 +1,13 @@
+const thisScript = import.meta.url;
+
+function resolveScript(uri) {
+  if (!/^\.{0,2}\//.test(uri)) {
+    uri = "./"+uri;
+  }
+  return new URL(uri, thisScript).toString();
+}
+
+
 function createImageData(typedArray, width, height, pitch = 0) {
   let arr;
   if (pitch && pitch !== width) {
@@ -16,11 +26,13 @@ function createImageData(typedArray, width, height, pitch = 0) {
 
 async function startService() {
   // Load the wasm module
-  const response = await fetch("screestitch.wasm");
+  const response = await fetch(resolveScript("../screestitch.wasm"));
   let memory;
   let overlap = [];
-  let phase = -1;
-  let quadInt;
+  let progressStart = 0;
+  const reportProgress = progress => {
+    console.log(performance.now() - progressStart, progress);
+  };
   const instanceAndModule = await WebAssembly.instantiateStreaming(response, { env: {
     setMemorySize(bytes) {
       if (bytes) {
@@ -43,9 +55,7 @@ async function startService() {
     dumpScore(score, x, y, w, h, a, b) {
       overlap = { score, x, y, w, h, a, b };
     },
-    reportProgress(progress) {
-      console.log(progress);
-    }
+    reportProgress,
   }});
   const instance = instanceAndModule.instance;
   memory = instance.exports.memory;
@@ -80,7 +90,11 @@ async function startService() {
       reset();
       let i1 = imageBitmapToBuffer(imageBitmap1);
       let i2 = imageBitmapToBuffer(imageBitmap2);
-      return await bufferToImageBitmap(findOverlap(i1, i2));
+      progressStart = performance.now();
+      return await bufferToImageBitmap(findOverlap(i1, i2)).then(e => {
+        reportProgress(0);
+        return e;
+      });
     }
   };
 }

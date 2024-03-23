@@ -89,3 +89,5 @@ const dropHandler = (element, callback, hoverCallback) => {
 
   return api;
 };
+
+export default dropHandler;

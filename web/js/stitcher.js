@@ -1,5 +1,16 @@
+import dropHandler from "./drop.js"
+
 const imageCollectionDiv = document.querySelector(".imageCollection");
 const images = [];
+const thisScript = import.meta.url;
+const testMode = false;
+
+function resolveScript(uri) {
+  if (!/^\.{0,2}\//.test(uri)) {
+    uri = "./"+uri;
+  }
+  return new URL(uri, thisScript).toString();
+}
 
 function loadImage(url) {
   return new Promise((resolve, reject) => {
@@ -65,6 +76,7 @@ function dumpImageData(imgData) {
 async function addImage(blob) {
   const image = await createImageBitmap(blob);
   const img = new SelectableImage(image);
+  img.selected = true;
   images.push(img);
   imageCollectionDiv.append(img.canvas);
 }
@@ -79,7 +91,7 @@ document.querySelector("input[type=file]").addEventListener("input", e => {
 
 dropHandler(document.body, blob => { addImage(blob); }, () => {});
 
-const worker = new Worker("stitch_worker.js");
+const worker = new Worker(resolveScript("stitch_worker.js"), { type: "module" });
 
 function stitch() {
   let sel = images.filter(e => e.selected).map(e => e.imageBitmap);
@@ -92,4 +104,11 @@ function stitch() {
   }
 }
 
-document.querySelector("button[type=button]", stitch);
+document.querySelector("button[type=button]").addEventListener("click", stitch);
+
+if (testMode) {
+  Promise.all([
+    fetch("1.png").then(r => r.blob()).then(blob => addImage(blob)),
+    fetch("2.png").then(r => r.blob()).then(blob => addImage(blob)),
+  ]).then(_ => stitch());
+}

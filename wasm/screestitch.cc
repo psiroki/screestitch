@@ -22,7 +22,12 @@ namespace {
   };
 
   struct Rect {
-    int32_t x1, y1, x2, y2;
+    union {
+      struct {
+        int32_t x1, y1, x2, y2;
+      };
+      int32_t coords[4];
+    };
 
     Rect() {}
     Rect(int32_t w, int32_t h): x1(0), y1(0), x2(w), y2(h) {}
@@ -117,6 +122,16 @@ namespace {
       return buffers[index];
     }
   };
+
+  inline uint32_t ablend(uint32_t col, uint8_t alpha) {
+    uint64_t v = 
+      (((col & 0xff0000ULL) << 16) |
+      ((col & 0xff00ULL) << 8) |
+      col & 0xffULL) * alpha;
+    return ((v >> 24) & 0xff0000) |
+      ((v >> 16) & 0xff00) |
+      ((v >> 8) & 0xff);
+  }
 }
 
 extern "C" unsigned char __heap_base;
@@ -407,6 +422,8 @@ extern "C" ImageBuffer* findOverlap(const ImageBuffer *a, const ImageBuffer *b) 
   int restoreY = maxScoreY < 0 ? -maxScoreY : 0;
   ar.shift(restoreX, restoreY);
   br.shift(restoreX, restoreY);
+  Rect overlap(ar);
+  overlap.intersect(br);
 
   guard.release();
 
@@ -427,12 +444,50 @@ extern "C" ImageBuffer* findOverlap(const ImageBuffer *a, const ImageBuffer *b) 
     srcLine += a->pitch;
     dstLine += arc->pitch;
   }
+
+  Rect arInBr(ar);
+  overlap.shift(-br.x1, -br.y1);
+  arInBr.shift(-br.x1, -br.y1);
+  // v points from the overlap center to the other image center
+  int32_t vx = (arInBr.x1 + arInBr.x2) / 2 - (overlap.x1 + overlap.x2) / 2;
+  int32_t vy = (arInBr.y1 + arInBr.y2) / 2 - (overlap.y1 + overlap.y2) / 2;
+  int64_t minDot = INT64_MAX;
+  int64_t maxDot = INT64_MIN;
+  for (int i = 0; i < 4; ++i) {
+    int32_t x = overlap.coords[(i & 1) << 1];
+    int32_t y = overlap.coords[i | 1];
+    int64_t dot = static_cast<int64_t>(vx) * x + static_cast<int64_t>(vy) * y;
+    if (dot < minDot) minDot = dot;
+    if (dot > maxDot) maxDot = dot;
+  }
+  int64_t dotDiff = maxDot - minDot;
+
   ImageBuffer *brc = clipImageBuffer(imageBufferShallowCopy(result), br);
   srcLine = b->pixels;
   dstLine = brc->pixels;
   for (int y = 0; y < b->height; ++y) {
-    for (int x = 0; x < b->width; ++x) {
-      dstLine[x] = srcLine[x];
+    if (y >= overlap.y1 && y < overlap.y2) {
+      int64_t dotBase = static_cast<int64_t>(vy) * y;
+      for (int x = 0; x < overlap.x1; ++x) {
+        dstLine[x] = srcLine[x];
+      }
+      for (int x = overlap.x1; x < overlap.x2; ++x) {
+        int64_t rawDot = dotBase + static_cast<int64_t>(vx) * x;
+        int32_t dot = (rawDot - minDot) * 256 / dotDiff;
+        if (dot >= 255) continue;
+        if (dot <= 0) {
+          dstLine[x] = srcLine[x];
+        } else {
+          dstLine[x] = ablend(dstLine[x], dot) + ablend(srcLine[x], 255-dot) | 0xff000000u;
+        }
+      }
+      for (int x = overlap.x2; x < b->width; ++x) {
+        dstLine[x] = srcLine[x];
+      }
+    } else {
+      for (int x = 0; x < b->width; ++x) {
+        dstLine[x] = srcLine[x];
+      }
     }
     srcLine += b->pitch;
     dstLine += brc->pitch;
