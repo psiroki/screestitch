@@ -30,8 +30,10 @@ async function startService() {
   let memory;
   let overlap = [];
   let progressStart = 0;
+  let currentProgressListener = _ => {};
   const reportProgress = progress => {
     console.log(performance.now() - progressStart, progress);
+    currentProgressListener(progress);
   };
   const instanceAndModule = await WebAssembly.instantiateStreaming(response, { env: {
     setMemorySize(bytes) {
@@ -86,15 +88,21 @@ async function startService() {
   }
 
   return {
-    async overlap(imageBitmap1, imageBitmap2) {
+    async overlap(imageBitmap1, imageBitmap2, port) {
       reset();
       let i1 = imageBitmapToBuffer(imageBitmap1);
       let i2 = imageBitmapToBuffer(imageBitmap2);
       progressStart = performance.now();
-      return await bufferToImageBitmap(findOverlap(i1, i2)).then(e => {
-        reportProgress(0);
-        return e;
-      });
+      try {
+        if (port) {
+          currentProgressListener = progress => {
+            port.postMessage({ progress });
+          };
+        }
+        return await bufferToImageBitmap(findOverlap(i1, i2));
+      } finally {
+        currentProgressListener = _ => {};
+      }
     }
   };
 }
@@ -102,6 +110,6 @@ async function startService() {
 const servicePromise = startService();
 
 self.addEventListener("message", e => {
-  servicePromise.then(service => service.overlap(e.data.bitmaps[0], e.data.bitmaps[1]))
+  servicePromise.then(service => service.overlap(e.data.bitmaps[0], e.data.bitmaps[1], e.data.port))
     .then(stitchedImage => e.data.port.postMessage({ result: stitchedImage }, [stitchedImage]));
 });

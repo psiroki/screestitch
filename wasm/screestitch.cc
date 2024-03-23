@@ -382,9 +382,10 @@ extern "C" MipChain* createMipChain(const ImageBuffer *a, int numMips) {
 extern "C" ImageBuffer* findOverlap(const ImageBuffer *a, const ImageBuffer *b) {
   auto guard = allocator.guard();
   uint32_t remaining = (((numPixels(a) + numPixels(b)) >> 8) * 3) >> 1;
-  reportProgress(remaining + 1);
+  reportProgress(remaining + remaining / 10);
   int numMips = mipsRecommendedCombined(a, b, 3);
   MipChain *ac = createMipChain(a, numMips);
+  reportProgress(remaining + remaining / 5);
   MipChain *bc = createMipChain(b, numMips);
   uint64_t maxScore = 0;
   int maxScoreX = 0;

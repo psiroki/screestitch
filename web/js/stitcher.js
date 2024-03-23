@@ -1,4 +1,6 @@
-import dropHandler from "./drop.js"
+import dropHandler from "./drop.js";
+import ScrollZoom from "./ui/scrollzoom.js";
+import { element, downloadCanvas } from "./ui/elements.js";
 
 const imageCollectionDiv = document.querySelector(".imageCollection");
 const images = [];
@@ -10,19 +12,6 @@ function resolveScript(uri) {
     uri = "./"+uri;
   }
   return new URL(uri, thisScript).toString();
-}
-
-function loadImage(url) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = _ => {
-      resolve(img);
-    };
-    img.onerror = e => {
-      reject(e);
-    };
-    img.src = url;
-  });
 }
 
 class SelectableImage {
@@ -96,11 +85,72 @@ const worker = new Worker(resolveScript("stitch_worker.js"), { type: "module" })
 function stitch() {
   let sel = images.filter(e => e.selected).map(e => e.imageBitmap);
   if (sel.length === 2) {
+    let progressBar = document.createElement("progress");
+    progressBar.removeAttribute("value");
+    document.body.append(progressBar);
     let c = new MessageChannel();
+    let start = 0;
+    let expectedLength = -1;
+    let maxProgress = 0;
+    let working = true;
+    let refreshProgress;
+    refreshProgress = () => {
+      if (start && expectedLength > 0) {
+        let now = performance.now();
+        progressBar.max = expectedLength;
+        progressBar.value = now - start;
+      }
+      if (working) {
+        requestAnimationFrame(refreshProgress);
+      } else {
+        progressBar.remove();
+      }
+    };
     c.port2.onmessage = e => {
-      document.body.append(new SelectableImage(e.data.result).canvas);
+      let msg = e.data;
+      if (msg.result) {
+        working = false;
+        let view, controls;
+        let canvas = new SelectableImage(e.data.result).canvas;
+        let slider, valueDisplay;
+        let resultDiv = element("div", [
+          view = element("div", [canvas], "view"),
+          controls = element("div", [
+            element("button", "PNG", null, _ => {
+              downloadCanvas("image_.png", canvas, "image/png");
+            }),
+            element("button", "JPEG", null, _ => {
+              downloadCanvas("image_.jpg", canvas, "image/jpeg", +slider.value);
+            }),
+            slider = element("input", [], {
+              type: "range",
+              min: 0,
+              max: 1,
+              step: 0.01,
+              value: 0.7,
+            }, {
+              input: _ => {
+                valueDisplay.textContent = (+slider.value*100)+"%";
+              },
+            }),
+            valueDisplay = element("span", "70%"),
+          ], "controls"),
+        ], "result");
+        document.body.append(resultDiv);
+        new ScrollZoom(view);
+      }
+      if (msg.progress) {
+        let now = performance.now();
+        let progress = msg.progress;
+        if (!start) start = now;
+        if (!maxProgress) maxProgress = msg.progress;
+        if (progress !== maxProgress) {
+          expectedLength = (now - start) / (maxProgress - progress) * maxProgress;
+        }
+      }
     };
     worker.postMessage({ bitmaps: [...sel], port: c.port1 }, [...sel, c.port1]);
+    refreshProgress();
   }
 }
 
