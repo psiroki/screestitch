@@ -2,5 +2,5 @@
 .vscode
 *.code-workspace
 web/*.wasm
-web/*.png
+web/?.png
 build
