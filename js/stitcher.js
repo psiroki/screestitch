@@ -5,7 +5,7 @@ import { element, downloadCanvas } from "./ui/elements.js";
 const imageCollectionDiv = document.querySelector(".imageCollection");
 const images = [];
 const thisScript = import.meta.url;
-const testMode = true;
+const testMode = location.hostname === "localhost";
 
 function resolveScript(uri) {
   if (!/^\.{0,2}\//.test(uri)) {
