@@ -5,7 +5,7 @@ import { element, downloadCanvas } from "./ui/elements.js";
 const imageCollectionDiv = document.querySelector(".imageCollection");
 const images = [];
 const thisScript = import.meta.url;
-const testMode = false;
+const testMode = true;
 
 function resolveScript(uri) {
   if (!/^\.{0,2}\//.test(uri)) {
@@ -87,7 +87,10 @@ function stitch() {
   if (sel.length === 2) {
     let progressBar = document.createElement("progress");
     progressBar.removeAttribute("value");
-    document.body.append(progressBar);
+    let remaining = element("span", "");
+    let progressPiece = element("div", [progressBar, remaining], "progress")
+    let resultDiv = element("div", [progressPiece], "result");
+    document.body.append(resultDiv);
     let c = new MessageChannel();
     let start = 0;
     let expectedLength = -1;
@@ -99,11 +102,17 @@ function stitch() {
         let now = performance.now();
         progressBar.max = expectedLength;
         progressBar.value = now - start;
+        let rem = (expectedLength - now + 999) * 1e-3 | 0;
+        let parts = [];
+        while (rem > 0 && parts.length < 3) {
+          let c = parts.length < 2 ? rem % 60 : c;
+          parts.unshift(c);
+          rem = (rem - c)/60 | 0;
+        }
+        remaining.textContent = parts.join(":");
       }
       if (working) {
         requestAnimationFrame(refreshProgress);
-      } else {
-        progressBar.remove();
       }
     };
     c.port2.onmessage = e => {
@@ -113,7 +122,8 @@ function stitch() {
         let view, controls;
         let canvas = new SelectableImage(e.data.result).canvas;
         let slider, valueDisplay;
-        let resultDiv = element("div", [
+        progressPiece.remove();
+        resultDiv.append(
           view = element("div", [canvas], "view"),
           controls = element("div", [
             element("button", "PNG", null, _ => {
@@ -134,9 +144,8 @@ function stitch() {
               },
             }),
             valueDisplay = element("span", "70%"),
-          ], "controls"),
-        ], "result");
-        document.body.append(resultDiv);
+          ], "controls")
+        );
         new ScrollZoom(view);
       }
       if (msg.progress) {
